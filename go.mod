@@ -1,3 +1,3 @@
-module github.com/bakw00ds/winterfellPlayground/goscan
+module github.com/bakw00ds/goscan
 
 go 1.22

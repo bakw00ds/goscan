@@ -59,6 +59,37 @@ func main() {
 		webPortsSpec string
 	)
 
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "goscan - fast TCP connect scanner + reporting\n\n")
+		fmt.Fprintf(os.Stderr, "USAGE:\n")
+		fmt.Fprintf(os.Stderr, "  Scan:   goscan -p <ports> (-t <targets> | -tf <targets.txt>) [options]\n")
+		fmt.Fprintf(os.Stderr, "  Import: goscan --import nmap-xml --in scan.xml [options]\n\n")
+		fmt.Fprintf(os.Stderr, "COMMON OPTIONS:\n")
+		fmt.Fprintf(os.Stderr, "  --format      text|csv|json (default text)\n")
+		fmt.Fprintf(os.Stderr, "  --out         output file (default stdout)\n")
+		fmt.Fprintf(os.Stderr, "  --only-open   only output open ports\n")
+		fmt.Fprintf(os.Stderr, "  --summary     text-only summary (default true)\n")
+		fmt.Fprintf(os.Stderr, "  --summary-json  include JSON summary object (json only)\n")
+		fmt.Fprintf(os.Stderr, "\nCSV AGGREGATION:\n")
+		fmt.Fprintf(os.Stderr, "  --group-by    (csv only) target|port\n")
+		fmt.Fprintf(os.Stderr, "\nWEB MODE (no HTTP requests):\n")
+		fmt.Fprintf(os.Stderr, "  --web         use/filter common web/admin ports\n")
+		fmt.Fprintf(os.Stderr, "  --web-ports   override web ports (same format as -p)\n")
+		fmt.Fprintf(os.Stderr, "  --emit        none|urls|hostport (derived open-only output)\n")
+		fmt.Fprintf(os.Stderr, "\nIMPORT:\n")
+		fmt.Fprintf(os.Stderr, "  --import      nmap-xml\n")
+		fmt.Fprintf(os.Stderr, "  --in          input file path (required with --import)\n")
+		fmt.Fprintf(os.Stderr, "\nLIMITS:\n")
+		fmt.Fprintf(os.Stderr, "  --max-targets  refuse after expanding targets (0 = unlimited)\n")
+		fmt.Fprintf(os.Stderr, "  --max-ports    refuse after parsing ports (0 = unlimited)\n\n")
+		fmt.Fprintf(os.Stderr, "EXAMPLES:\n")
+		fmt.Fprintf(os.Stderr, "  goscan -p 80,443 -t \"example.com,10.0.0.0/24\" --only-open\n")
+		fmt.Fprintf(os.Stderr, "  goscan --web -tf targets.txt --emit urls --only-open --out web-urls.txt\n")
+		fmt.Fprintf(os.Stderr, "  goscan --import nmap-xml --in scan.xml --web --emit urls\n\n")
+		fmt.Fprintf(os.Stderr, "FLAGS:\n")
+		flag.PrintDefaults()
+	}
+
 	flag.StringVar(&portSpec, "p", "80,443", "ports (e.g. 80,443,5900-5905)")
 	flag.StringVar(&targetSpec, "t", "", "targets (comma-separated: host, ip, cidr, range; e.g. \"example.com,192.168.1.1,192.168.2.1-100,10.10.10.0/24\")")
 	flag.StringVar(&targetFile, "tf", "", "targets file (one per line; blank lines and # comments allowed)")
@@ -81,7 +112,7 @@ func main() {
 
 	format = strings.ToLower(strings.TrimSpace(format))
 	if format != "text" && format != "csv" && format != "json" {
-		fatalf("invalid --format %q (expected text|csv|json)", format)
+		fatalf("invalid --format %q (expected: text|csv|json)", format)
 	}
 
 	emit = strings.ToLower(strings.TrimSpace(emit))
@@ -89,25 +120,32 @@ func main() {
 		emit = "none"
 	}
 	if emit != "none" && emit != "urls" && emit != "hostport" {
-		fatalf("invalid --emit %q (expected none|urls|hostport)", emit)
+		fatalf("invalid --emit %q (expected: none|urls|hostport)", emit)
+	}
+
+	groupBy = strings.ToLower(strings.TrimSpace(groupBy))
+	if groupBy != "" && groupBy != "target" && groupBy != "port" {
+		fatalf("invalid --group-by %q (expected: target|port)", groupBy)
 	}
 
 	// IMPORT MODE
 	if strings.TrimSpace(importKind) != "" {
 		if strings.TrimSpace(importPath) == "" {
-			fatalf("--in is required when using --import")
+			fatalf("missing --in: when using --import %q you must provide an input file path (e.g. --in scan.xml)", importKind)
 		}
+		fmt.Fprintf(os.Stderr, "[+] Importing %s from %s\n", importKind, importPath)
 		results, err := importResults(importKind, importPath)
 		if err != nil {
 			fatalf("import failed: %v", err)
 		}
 		writeResults(results, outputOpts{Format: format, OutPath: outPath, OnlyOpen: onlyOpen, Summary: summary, SummaryJSON: summaryJSON, GroupBy: groupBy, Emit: emit, Web: web, WebPortsSpec: webPortsSpec})
+		printSuccess(results, outPath, format, emit, web)
 		return
 	}
 
 	// SCAN MODE
 	if strings.TrimSpace(targetSpec) == "" && strings.TrimSpace(targetFile) == "" {
-		fatalf("specify -t and/or -tf")
+		fatalf("missing targets: specify -t and/or -tf (run with -h for examples)")
 	}
 
 	if web {
@@ -128,7 +166,7 @@ func main() {
 	if strings.TrimSpace(targetFile) != "" {
 		fileTargets, err := parseTargetsFile(targetFile)
 		if err != nil {
-			fatalf("error parsing targets file: %v", err)
+			fatalf("error parsing targets file %q: %v", targetFile, err)
 		}
 		targets = append(targets, fileTargets...)
 	}
@@ -139,6 +177,11 @@ func main() {
 	}
 
 	timeout := time.Duration(timeoutMS) * time.Millisecond
+
+	fmt.Fprintf(os.Stderr, "[+] Scanning %d targets × %d ports (%d checks) with %d workers, timeout=%s\n", len(targets), len(ports), len(targets)*len(ports), concurrency, timeout)
+	if web {
+		fmt.Fprintf(os.Stderr, "[+] Web-mode enabled (ports: %s)\n", webPortsSpec)
+	}
 
 	jobs := make(chan Job, 4096)
 	resultsCh := make(chan Result, 4096)
@@ -184,6 +227,7 @@ func main() {
 
 	sortResults(results)
 	writeResults(results, outputOpts{Format: format, OutPath: outPath, OnlyOpen: onlyOpen, Summary: summary, SummaryJSON: summaryJSON, GroupBy: groupBy, Emit: emit, Web: web, WebPortsSpec: webPortsSpec})
+	printSuccess(results, outPath, format, emit, web)
 }
 
 type outputOpts struct {
@@ -1100,7 +1144,32 @@ func classifyDialErr(err error) (state, reason string) {
 
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, "hint: run with -h for usage/examples\n")
 	os.Exit(2)
+}
+
+func printSuccess(results []Result, outPath, format, emit string, web bool) {
+	open := 0
+	for _, r := range results {
+		if r.State == "open" {
+			open++
+		}
+	}
+	dest := "stdout"
+	if strings.TrimSpace(outPath) != "" {
+		dest = outPath
+	}
+	mode := "scan"
+	_ = mode
+	if emit != "none" {
+		fmt.Fprintf(os.Stderr, "[+] Done. open=%d, emitted=%s -> %s\n", open, emit, dest)
+		return
+	}
+	if web {
+		fmt.Fprintf(os.Stderr, "[+] Done (web-filtered). open=%d, format=%s -> %s\n", open, format, dest)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[+] Done. open=%d, format=%s -> %s\n", open, format, dest)
 }
 
 // --- Importers ---
