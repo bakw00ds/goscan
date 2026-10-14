@@ -82,3 +82,7 @@ target/proto:port state [reason]
 ```
 
 For imported Nmap XML, service fields may be included.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
